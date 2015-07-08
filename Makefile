@@ -2,7 +2,7 @@ OBJS     = utp_internal.o utp_utils.o utp_hash.o utp_callbacks.o utp_api.o utp_p
 CFLAGS   = -Wall -DPOSIX -g -fno-exceptions
 CXXFLAGS = $(CFLAGS) -fPIC -fno-rtti
 CC       = gcc
-CXX      = g++
+CXX      = g++ -std=c++11
 
 CXXFLAGS += -Wno-sign-compare
 CXXFLAGS += -fpermissive
@@ -22,10 +22,13 @@ ifeq ($(strip $(lrt)),0)
   LDFLAGS += -lrt
 endif
 
-all: libutp.so libutp.a ucat ucat-static
+all: libutp.so libutp_crust.so libutp.a ucat ucat-static
 
 libutp.so: $(OBJS)
 	$(CXX) $(CXXFLAGS) -o libutp.so -shared $(OBJS)
+
+libutp_crust.so: $(OBJS) utp_crust.o
+	$(CXX) $(CXXFLAGS) -o libutp_crust.so -shared $(OBJS)
 
 libutp.a: $(OBJS)
 	ar rvs libutp.a $(OBJS)
