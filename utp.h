@@ -161,6 +161,7 @@ void			utp_check_timeouts				(utp_context *ctx);
 void			utp_issue_deferred_acks			(utp_context *ctx);
 utp_context_stats* utp_get_context_stats		(utp_context *ctx);
 utp_socket*		utp_create_socket				(utp_context *ctx);
+void             utp_destroy_unconnected_socket                               (utp_socket *s);
 void*			utp_set_userdata				(utp_socket *s, void *userdata);
 void*			utp_get_userdata				(utp_socket *s);
 int				utp_setsockopt					(utp_socket *s, int opt, int val);

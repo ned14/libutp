@@ -2437,7 +2437,7 @@ UTPSocket::~UTPSocket()
 
 	// Remove object from the global hash table
 	UTPSocketKeyData* kd = ctx->utp_sockets->Delete(UTPSocketKey(addr, conn_id_recv));
-	assert(kd);
+	//assert(kd);
 
 	// remove the socket from ack_sockets if it was there also
 	removeSocketFromAckList(this);
@@ -2572,6 +2572,11 @@ utp_socket*	utp_create_socket(utp_context *ctx)
 	#endif
 
 	return conn;
+}
+
+void utp_destroy_unconnected_socket(utp_socket *s)
+{
+  delete s;
 }
 
 int utp_context_set_option(utp_context *ctx, int opt, int val)

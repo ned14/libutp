@@ -20,8 +20,10 @@
 
 // Fetch sockaddr_t etc.
 #ifdef WIN32
-# include "winsock2.h"
+# include <Winsock2.h>
 #else
+# include <netinet/in.h>
+# include <arpa/inet.h>
 # include <sys/socket.h>
 #endif
 
@@ -29,15 +31,20 @@
 extern "C" {
 #endif
 
-typedef void *utp_crust_socket;
+typedef int utp_crust_socket;
 
 typedef enum event_code_t
 {
-  UTP_CRUST_BEGIN,             // data=(unsigned short listening port), bytes=2
-  UTP_CRUST_END,               // data=(unsigned short listening port), bytes=2
+  // Sent when a socket is being destroyed
+  UTP_CRUST_SOCKET_CLEANUP,
+  // Sent when a new connection was made
   UTP_CRUST_NEW_CONNECTION,    // data=sockaddr_t
+  // Sent when a connection was ended
   UTP_CRUST_LOST_CONNECTION,   // data=sockaddr_t
-  UTP_CRUST_NEW_MESSAGE        // data=message, bytes=length
+  // Sent when a new message arrives
+  UTP_CRUST_NEW_MESSAGE,       // data=message, bytes=length
+  // Sent when the send queue has space
+  UTP_CRUST_PLEASE_SEND
 } event_code;
 
 // The callback invoked when things happen on your socket
@@ -48,7 +55,7 @@ typedef void (*utp_crust_event_callback)(utp_crust_socket socket, event_code ev,
 extern int utp_crust_create_socket(utp_crust_socket *socket, unsigned short *port, utp_crust_event_callback callback);
 
 // Connect a socket to an endpoint
-extern int utp_crust_connect(utp_crust_socket socket, const struct sockaddr_t *addr, socklen_t len);
+extern int utp_crust_connect(utp_crust_socket socket, const struct sockaddr *addr, socklen_t len);
 
 // Sends data
 extern int utp_crust_send(utp_crust_socket socket, const void *buf, size_t bytes);

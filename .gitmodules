@@ -1,3 +1,6 @@
 [submodule "rust-bindgen"]
 	path = rust-bindgen
 	url = https://github.com/crabtw/rust-bindgen.git
+[submodule "CATCH"]
+	path = CATCH
+	url = https://github.com/ned14/Catch-ThreadSafe.git

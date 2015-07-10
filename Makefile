@@ -1,11 +1,11 @@
-OBJS     = utp_internal.o utp_utils.o utp_hash.o utp_callbacks.o utp_api.o utp_packedsockaddr.o
-CFLAGS   = -Wall -DPOSIX -g -fno-exceptions
-CXXFLAGS = $(CFLAGS) -fPIC -fno-rtti
+OBJS     = utp_internal.o utp_utils.o utp_hash.o utp_callbacks.o utp_api.o utp_packedsockaddr.o utp_crust.o
+CFLAGS   = -Wall -DPOSIX -g
+CXXFLAGS = $(CFLAGS) -fPIC
 CC       = gcc
-CXX      = g++ -std=c++11
+CXX      = g++-5 -std=c++14
 
 CXXFLAGS += -Wno-sign-compare
-CXXFLAGS += -fpermissive
+CXXFLAGS += -fpermissive -pthread
 
 # Uncomment to enable utp_get_stats(), and a few extra sanity checks
 CFLAGS += -D_DEBUG
@@ -22,13 +22,10 @@ ifeq ($(strip $(lrt)),0)
   LDFLAGS += -lrt
 endif
 
-all: libutp.so libutp_crust.so libutp.a ucat ucat-static
+all: libutp.so libutp.a ucat ucat-static test_utp_crust
 
 libutp.so: $(OBJS)
 	$(CXX) $(CXXFLAGS) -o libutp.so -shared $(OBJS)
-
-libutp_crust.so: $(OBJS) utp_crust.o
-	$(CXX) $(CXXFLAGS) -o libutp_crust.so -shared $(OBJS)
 
 libutp.a: $(OBJS)
 	ar rvs libutp.a $(OBJS)
@@ -38,9 +35,12 @@ ucat: ucat.o libutp.so
 
 ucat-static: ucat.o libutp.a
 	$(CXX) $(CXXFLAGS) -o ucat-static ucat.o libutp.a $(LDFLAGS)
+	
+test_utp_crust: test_utp_crust.o libutp.a
+	$(CXX) $(CXXFLAGS) -o test_utp_crust test_utp_crust.o libutp.a $(LDFLAGS)
 
 clean:
-	rm -f *.o libutp.so libutp.a ucat ucat-static
+	rm -f *.o libutp.so libutp.a ucat ucat-static test_utp_crust
 
 tags: $(shell ls *.cpp *.h)
 	rm -f tags
