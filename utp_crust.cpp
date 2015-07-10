@@ -18,13 +18,18 @@
 #include "utp_crust.h"
 #include "utp.h"
 
+#undef _DEBUG
+
 #include <stdio.h>
+#include <string.h>
+#include <assert.h>
 #include <mutex>
 #include <unordered_map>
 #include <memory>
 #include <thread>
 #include <vector>
 #include <future>
+#include <deque>
 
 #ifdef WIN32
 using socket_type = SOCKET;
@@ -52,10 +57,11 @@ struct socket_info : std::enable_shared_from_this<socket_info>
   utp_crust_socket id;
   socket_type h;
   unsigned short port;
-  bool connected;
+  bool connected, already_sending;
   utp_socket *utph;
   utp_crust_event_callback callback;
-  socket_info(socket_type _h, unsigned short _port, utp_crust_event_callback _callback) : id(0), h(_h), port(_port), connected(false), utph(nullptr), callback(_callback) { }
+  std::deque<std::pair<std::vector<unsigned char>, size_t>> send_queue;
+  socket_info(socket_type _h, unsigned short _port, utp_crust_event_callback _callback) : id(0), h(_h), port(_port), connected(false), already_sending(false), utph(nullptr), callback(_callback) { }
   ~socket_info()
   {
     if(h!=(socket_type)-1)
@@ -80,6 +86,55 @@ struct socket_info : std::enable_shared_from_this<socket_info>
         utp_destroy_unconnected_socket(utph);
       last_socket_id=last_id;
       utph=nullptr;
+    }
+  }
+  void fill_send_queue()
+  {
+    if(!already_sending && !send_queue.empty())
+    {
+      std::vector<utp_iovec> vecs;
+      ssize_t written=0;
+      do
+      {
+        vecs.clear();
+        vecs.reserve(send_queue.size());
+        for(auto &i : send_queue)
+        {
+          vecs.push_back({ i.first.data()+i.second, i.first.size()-i.second });
+#ifdef _DEBUG
+          printf("About to send on socket %d %p-%u (+%u)\n", id, vecs.back().iov_base, (unsigned) vecs.back().iov_len, (unsigned) i.second);
+#endif
+        }
+        already_sending=true;
+        written=utp_writev(utph, vecs.data(), vecs.size());
+        already_sending=false;
+#ifdef _DEBUG
+        printf("Sent %d bytes\n", (int) written);
+#endif
+        if(written<=0)
+          break;
+        assert(!send_queue.empty());
+        while(written>0)
+        {
+          size_t thisbuffer=send_queue.front().first.size()-send_queue.front().second;
+          if(thisbuffer<=written)
+          {
+            send_queue.pop_front();
+            if(send_queue.empty())
+              break;
+            written-=thisbuffer;
+          }
+          else
+          {
+            send_queue.front().second+=written;
+            written=0;
+          }
+        }
+      } while(!send_queue.empty());
+      size_t totalbytes=0;
+      for(auto &i : send_queue)
+        totalbytes+=i.first.size()-i.second;
+      callback(id, UTP_CRUST_SEND_QUEUE_STATUS, nullptr, totalbytes);
     }
   }
 };
@@ -249,9 +304,9 @@ struct worker_thread_t
             break;
           case UTP_STATE_WRITABLE:
 #ifdef _DEBUG
-            printf("Writable on socket id %d\n", id);
+            printf("Now writable on socket id %d\n", id);
 #endif
-            if(si) si->callback(id, UTP_CRUST_PLEASE_SEND, nullptr, 0);
+            if(si) si->fill_send_queue();
             break;
           case UTP_STATE_EOF:
 #ifdef _DEBUG
@@ -454,7 +509,11 @@ extern "C" int utp_crust_send(utp_crust_socket id, const void *buf, size_t bytes
     errno=EINVAL;
     return -1;
   }
-  return utp_write(it->second->utph, (void *) buf, bytes);
+  std::vector<unsigned char> vec(bytes);
+  memcpy(vec.data(), buf, bytes);
+  it->second->send_queue.push_back(std::make_pair(vec, 0));
+  it->second->fill_send_queue();
+  return (int) bytes;
 }
 
 // Destroy a previously created socket, closing down any background libutp pumping thread as needed
@@ -462,6 +521,7 @@ extern "C" int utp_crust_destroy_socket(utp_crust_socket id)
 {
   std::unique_lock<decltype(sockets_lock)> h(sockets_lock);
   auto it=sockets_by_id.find(id);
+  // Sockets can get destroyed asynchronously, so don't fail if not found.
   if(it!=sockets_by_id.end())
     it->second->close();
   return 0;

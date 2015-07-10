@@ -19,14 +19,19 @@
 #define CATCH_CONFIG_PREFIX_ALL
 #define CATCH_CONFIG_MAIN
 #include "CATCH/single_include/catch.hpp"
+#include <future>
 
-static size_t bytes_received;
+static std::promise<size_t> send_queue_emptied, bytes_received;
+static size_t socketstogo;
 void handler(utp_crust_socket socket, event_code ev, const void *data, size_t bytes)
 {
+  static size_t _bytes_received;
   switch(ev)
   {
     case UTP_CRUST_SOCKET_CLEANUP:
       printf("HANDLER: socket id %d cleanup\n", socket);
+      if(!--socketstogo)
+        bytes_received.set_value(_bytes_received);
       break;
     case UTP_CRUST_NEW_CONNECTION:
       printf("HANDLER: socket id %d new connection\n", socket);
@@ -36,16 +41,23 @@ void handler(utp_crust_socket socket, event_code ev, const void *data, size_t by
       break;
     case UTP_CRUST_NEW_MESSAGE:
       printf("HANDLER: socket id %d new message sized %u\n", socket, (unsigned) bytes);
-      bytes_received+=bytes;
+      _bytes_received+=bytes;
       break;
-    case UTP_CRUST_PLEASE_SEND:
-      printf("HANDLER: socket id %d has send queue space\n", socket);
+    case UTP_CRUST_SEND_QUEUE_STATUS:
+      printf("HANDLER: socket id %d has %u bytes in send queue\n", socket, (unsigned) bytes);
+      if(bytes==0)
+        send_queue_emptied.set_value(_bytes_received);
       break;
   }
 }
 
 CATCH_TEST_CASE( "utp_crust works", "[utp_crust]" )
 {
+  socketstogo=1;
+  send_queue_emptied=std::promise<size_t>();
+  bytes_received=std::promise<size_t>();
+  auto _send_queue_emptied=send_queue_emptied.get_future();
+  auto _bytes_received=bytes_received.get_future();
   utp_crust_socket listener, connecter;
   unsigned short port;
   port=0;
@@ -55,14 +67,14 @@ CATCH_TEST_CASE( "utp_crust works", "[utp_crust]" )
   struct sockaddr_in addr={AF_INET, htons(port)};
   addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
   CATCH_CHECK(utp_crust_connect(connecter, (sockaddr *) &addr, sizeof(addr))==0);
-  char buffer[1024];
-  memset(buffer, 78, sizeof(buffer));
-  bytes_received=0;
+  std::vector<char> buffer(1024*1024);
+  memset(buffer.data(), 78, buffer.size());
   for(size_t n=0; n<100; n++)
   {
-    CATCH_CHECK(utp_crust_send(connecter, buffer, sizeof(buffer))==sizeof(buffer));
+    CATCH_CHECK(utp_crust_send(connecter, buffer.data(), buffer.size())==buffer.size());
   }
+  _send_queue_emptied.wait();
   CATCH_CHECK(utp_crust_destroy_socket(connecter)==0);
   CATCH_CHECK(utp_crust_destroy_socket(listener)==0);
-  CATCH_CHECK(bytes_received==sizeof(buffer)*100);
+  CATCH_CHECK(_bytes_received.get()==buffer.size()*100);
 }

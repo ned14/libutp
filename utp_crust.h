@@ -43,8 +43,8 @@ typedef enum event_code_t
   UTP_CRUST_LOST_CONNECTION,   // data=sockaddr_t
   // Sent when a new message arrives
   UTP_CRUST_NEW_MESSAGE,       // data=message, bytes=length
-  // Sent when the send queue has space
-  UTP_CRUST_PLEASE_SEND
+  // Sent when the send queue has changed
+  UTP_CRUST_SEND_QUEUE_STATUS  // bytes=bytes in queue
 } event_code;
 
 // The callback invoked when things happen on your socket
