@@ -86,6 +86,7 @@ struct UTPSocketKey {
 	}
 
 	uint32 compute_hash() const {
+    //printf("UTPSocketKey hash=%u recv_id=%u port=%u\n", recv_id ^ addr.compute_hash(), recv_id, addr._port);
 		return recv_id ^ addr.compute_hash();
 	}
 };

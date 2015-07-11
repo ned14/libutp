@@ -18,8 +18,6 @@
 #include "utp_crust.h"
 #include "utp.h"
 
-#undef _DEBUG
-
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
@@ -106,7 +104,9 @@ struct socket_info : std::enable_shared_from_this<socket_info>
 #endif
         }
         already_sending=true;
+        last_socket_id = id;
         written=utp_writev(utph, vecs.data(), vecs.size());
+        last_socket_id = 0;
         already_sending=false;
 #ifdef _DEBUG
         printf("Sent %d bytes\n", (int) written);
@@ -117,7 +117,7 @@ struct socket_info : std::enable_shared_from_this<socket_info>
         while(written>0)
         {
           size_t thisbuffer=send_queue.front().first.size()-send_queue.front().second;
-          if(thisbuffer<=written)
+          if(thisbuffer<=(size_t) written)
           {
             send_queue.pop_front();
             if(send_queue.empty())
@@ -156,8 +156,11 @@ struct worker_thread_t
     {
       if(!sockets_by_id.empty())
       {
-        si=sockets_by_id.begin()->second;
         id=last_socket_id;
+        if (id)
+          si = sockets_by_id[id];
+        else
+          abort(); // si = sockets_by_id.begin()->second;
       }
     }
     else
@@ -172,7 +175,7 @@ struct worker_thread_t
     utp_crust_socket id;
     find_socket(si, id, args->socket);
 #ifdef _DEBUG
-    printf("sendto args->socket=%p fromid=%d\n", args->socket, id);
+    printf("sendto args->socket=%p fromid=%d packet type=%x conn_id=%u\n", args->socket, id, *args->buf, args->buf[3]);
 #endif
     if(!si)
     {
@@ -183,7 +186,7 @@ struct worker_thread_t
     socket_type h=si->h;
     // Allow reads during sends
     sockets_lock.unlock();
-    if(-1==sendto(h, args->buf, args->len, 0, args->address, args->address_len))
+    if(-1==sendto(h, (const char *) args->buf, args->len, 0, args->address, args->address_len))
     {
       fprintf(stderr, "utp sendto failed with errno %d, ignoring\n", errno);
       // TODO: Should I check for EWOULDBLOCK and yield and retry?
@@ -379,12 +382,42 @@ struct worker_thread_t
         }
       }
 #ifdef WIN32
-      todo;
+      for (auto &si : sis)
+      {
+        if (0 != WSAEventSelect(si->h, canceller[1], FD_READ))
+        {
+          fprintf(stderr, "WARNING: utp_crust WSAEventSelect returned error %d\n", WSAGetLastError());
+        }
+      }
+      if((len = (ssize_t) WaitForMultipleObjects(2, canceller, false, 500))>0)
+      {
+#ifdef _DEBUG
+        printf("UTP worker poll returns %d, updated=%d\n", (int)len, len==0);
+#endif
+        if(len==0)
+          ResetEvent(canceller[0]);
+        else if (len == 1)
+        {
+          ResetEvent(canceller[1]);
+          for (auto &si : sis)
+          {
+            unsigned long toread = 0;
+            ioctlsocket(si->h, FIONREAD, &toread);
+            if (!toread)
+              continue;
+            last_socket_id = si->id;
+            std::lock_guard<decltype(sockets_lock)> h(sockets_lock);
+            do
+            {
+              memset(&src_addr, 0, sizeof(src_addr));
+              addrlen = sizeof(src_addr);
+              len=recvfrom(si->h, (char *) buffer, sizeof(buffer), 0, (struct sockaddr *)&src_addr, &addrlen);
+              //printf("Received packet from port %u\n", ntohs(src_addr.sin_port));
 #else
       std::vector<pollfd> buf;
       buf.reserve(sis.size()+1);
       buf.push_back({canceller[0], POLLIN, 0});
-      for(auto si : sis)
+      for(auto &si : sis)
         buf.push_back({si->h, POLLIN, 0});
 #ifdef _DEBUG
       printf("UTP worker thread polls %u fds\n", (unsigned) buf.size());
@@ -410,6 +443,7 @@ struct worker_thread_t
             do
             {
               len=recvfrom(buf[n].fd, buffer, sizeof(buffer), MSG_DONTWAIT, (struct sockaddr *)&src_addr, &addrlen);
+#endif      
               if(len>=0)
                 utp_process_udp(ctx, buffer, len, (struct sockaddr *)&src_addr, addrlen);
             } while(len>=0);
@@ -420,7 +454,6 @@ struct worker_thread_t
       }
       std::lock_guard<decltype(sockets_lock)> h(sockets_lock);
       utp_check_timeouts(ctx);
-#endif      
     }
 #ifdef _DEBUG
     printf("UTP worker thread shutdown\n");
@@ -436,7 +469,14 @@ extern "C" int utp_crust_create_socket(utp_crust_socket *id, unsigned short *por
   if(h==(socket_type)-1) return -1;
   struct sockaddr_in res={AF_INET, htons(*port)};
   socklen_t socklen=sizeof(res);
-  if(-1==bind(h, (sockaddr *) &res, socklen) || -1==getsockname(h, (sockaddr *) &res, &socklen))
+  unsigned long nonblocking = 1;
+  if(-1==bind(h, (sockaddr *) &res, socklen) || -1==getsockname(h, (sockaddr *) &res, &socklen) ||
+#ifdef WIN32
+    -1==ioctlsocket(h, FIONBIO, &nonblocking)
+#else
+    -1==ioctl(h, FIONBIO, &nonblocking)
+#endif
+    )
   {
     closesocket(h);
     return -1;

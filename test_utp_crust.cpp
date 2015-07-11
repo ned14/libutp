@@ -17,7 +17,7 @@
 
 #include "utp_crust.h"
 #define CATCH_CONFIG_PREFIX_ALL
-#define CATCH_CONFIG_MAIN
+#define CATCH_CONFIG_RUNNER
 #include "CATCH/single_include/catch.hpp"
 #include <future>
 
@@ -61,12 +61,12 @@ CATCH_TEST_CASE( "utp_crust works", "[utp_crust]" )
   utp_crust_socket listener, connecter;
   unsigned short port;
   port=0;
-  CATCH_CHECK(utp_crust_create_socket(&connecter, &port, handler)==0);
+  CATCH_REQUIRE(utp_crust_create_socket(&connecter, &port, handler)==0);
   port=0;
-  CATCH_CHECK(utp_crust_create_socket(&listener, &port, handler)==0);
+  CATCH_REQUIRE(utp_crust_create_socket(&listener, &port, handler)==0);
   struct sockaddr_in addr={AF_INET, htons(port)};
   addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
-  CATCH_CHECK(utp_crust_connect(connecter, (sockaddr *) &addr, sizeof(addr))==0);
+  CATCH_REQUIRE(utp_crust_connect(connecter, (sockaddr *) &addr, sizeof(addr))==0);
   std::vector<char> buffer(1024*1024);
   memset(buffer.data(), 78, buffer.size());
   for(size_t n=0; n<100; n++)
@@ -77,4 +77,14 @@ CATCH_TEST_CASE( "utp_crust works", "[utp_crust]" )
   CATCH_CHECK(utp_crust_destroy_socket(connecter)==0);
   CATCH_CHECK(utp_crust_destroy_socket(listener)==0);
   CATCH_CHECK(_bytes_received.get()==buffer.size()*100);
+}
+
+int main(int argc, char *argv[])
+{
+#ifdef WIN32
+  WSADATA w;
+  WSAStartup(MAKEWORD(2, 2), &w);
+#endif
+  int result = Catch::Session().run(argc, argv);
+  return result;
 }

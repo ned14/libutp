@@ -76,10 +76,6 @@
 	#define I64u "%Lu"
 #endif
 
-#ifdef WIN32
-	#define snprintf _snprintf
-#endif
-
 // standard types
 typedef unsigned char byte;
 typedef unsigned char uint8;
@@ -107,7 +103,7 @@ CASSERT(8 == sizeof(uint64), sizeof_uint64_is_8)
 CASSERT(8 == sizeof(int64), sizeof_int64_is_8)
 
 #ifndef INT64_MAX
-#define INT64_MAX 0x7fffffffffffffffLL
+#define INT64_MAX        9223372036854775807i64
 #endif
 
 // always ANSI
