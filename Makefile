@@ -2,7 +2,7 @@ OBJS     = utp_internal.o utp_utils.o utp_hash.o utp_callbacks.o utp_api.o utp_p
 CFLAGS   = -Wall -DPOSIX -g
 CXXFLAGS = $(CFLAGS) -fPIC
 CC       = gcc
-CXX      = g++ -std=c++0x -sanitize=undefined
+CXX      = g++ -std=c++0x #-sanitize=undefined
 
 CXXFLAGS += -Wno-sign-compare
 CXXFLAGS += -fpermissive -pthread
