@@ -7,5 +7,6 @@ build:
   verbosity: minimal
 before_build:
   - call "C:\Program Files (x86)\Microsoft Visual Studio 14.0\VC\vcvarsall.bat" x86
+  - git submodule update --init --recursive
 test_script:
   - Debug\test_utp_crust.exe
