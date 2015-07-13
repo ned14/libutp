@@ -23,6 +23,8 @@
 #ifndef __UTP_TYPES_H__
 #define __UTP_TYPES_H__
 
+#include <stdint.h>
+
 #ifdef __GNUC__
 	// Used for gcc tool chains accepting but not supporting pragma pack
 	// See http://gcc.gnu.org/onlinedocs/gcc/Type-Attributes.html
@@ -101,10 +103,6 @@ typedef long long int64;
 
 CASSERT(8 == sizeof(uint64), sizeof_uint64_is_8)
 CASSERT(8 == sizeof(int64), sizeof_int64_is_8)
-
-#ifndef INT64_MAX
-#define INT64_MAX        9223372036854775807i64
-#endif
 
 // always ANSI
 typedef const char * cstr;
