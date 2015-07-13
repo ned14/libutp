@@ -61,8 +61,11 @@ extern int utp_crust_connect(utp_crust_socket socket, const struct sockaddr *add
 // Sends data
 extern int utp_crust_send(utp_crust_socket socket, const void *buf, size_t bytes);
 
+// Flushes pending send data
+extern int utp_crust_flush(utp_crust_socket socket);
+
 // Destroy a previously created socket, closing down any background libutp pumping thread as needed
-extern int utp_crust_destroy_socket(utp_crust_socket socket);
+extern int utp_crust_destroy_socket(utp_crust_socket socket, int flush);
 
 #ifdef __cplusplus
 }

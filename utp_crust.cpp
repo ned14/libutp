@@ -18,6 +18,8 @@
 #include "utp_crust.h"
 #include "utp.h"
 
+//#define LOGGING
+
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
@@ -28,6 +30,7 @@
 #include <vector>
 #include <future>
 #include <deque>
+#include <utility>
 
 #ifdef WIN32
 using socket_type = SOCKET;
@@ -38,30 +41,107 @@ using socket_type = int;
 # define closesocket(h) ::close(h)
 #endif
 
+struct sockaddr_hash
+{
+  size_t operator ()(const struct sockaddr &sa) const
+  {
+    size_t hash = 0;
+    switch (sa.sa_family)
+    {
+      case AF_INET:
+      {
+        struct sockaddr_in *s4 = (struct sockaddr_in *) &sa;
+        hash ^= std::hash<decltype(s4->sin_family)>()(s4->sin_family);
+        hash ^= std::hash<decltype(s4->sin_port)>()(s4->sin_port);
+        hash ^= std::hash<decltype(s4->sin_addr.s_addr)>()(s4->sin_addr.s_addr);
+        break;
+      }
+      case AF_INET6:
+      {
+        struct sockaddr_in6 *s6 = (struct sockaddr_in6 *) &sa;
+        hash ^= std::hash<decltype(s6->sin6_family)>()(s6->sin6_family);
+        hash ^= std::hash<decltype(s6->sin6_port)>()(s6->sin6_port);
+        hash ^= std::hash<decltype(s6->sin6_flowinfo)>()(s6->sin6_flowinfo);
+        uint32_t *a = (uint32_t *) s6->sin6_addr.s6_addr;
+        for (size_t n = 0; n < 4; n++)
+          hash ^= std::hash<uint32_t>()(a[n]);
+        hash ^= std::hash<decltype(s6->sin6_scope_id)>()(s6->sin6_scope_id);
+        break;
+      }
+      default:
+        abort();
+    }
+    return hash;
+  }
+};
+inline bool operator==(const struct sockaddr &a, const struct sockaddr &b) noexcept
+{
+  if (a.sa_family != b.sa_family)
+    return false;
+  switch (a.sa_family)
+  {
+    case AF_INET:
+    {
+      struct sockaddr_in *a4 = (struct sockaddr_in *) &a;
+      struct sockaddr_in *b4 = (struct sockaddr_in *) &b;
+      return a4->sin_port == b4->sin_port && a4->sin_addr.s_addr == b4->sin_addr.s_addr;
+    }
+    case AF_INET6:
+    {
+      struct sockaddr_in6 *a6 = (struct sockaddr_in6 *) &a;
+      struct sockaddr_in6 *b6 = (struct sockaddr_in6 *) &b;
+      return a6->sin6_port == b6->sin6_port && a6->sin6_flowinfo == b6->sin6_flowinfo && !memcmp(a6->sin6_addr.s6_addr, b6->sin6_addr.s6_addr, 16) && a6->sin6_scope_id == b6->sin6_scope_id;
+    }
+    default:
+      abort();
+  }
+}
+
 struct socket_info;
 struct worker_thread_t;
-static std::mutex sockets_lock;
+static std::mutex *sockets_lock(new std::mutex());
 static utp_crust_socket socket_id;
 static std::unordered_map<utp_crust_socket, std::shared_ptr<socket_info>> sockets_by_id;
 static std::unordered_map<utp_socket *, std::shared_ptr<socket_info>> sockets_by_utpsocket;
-#ifdef _MSC_VER
+static std::unordered_map<struct sockaddr, std::shared_ptr<socket_info>, sockaddr_hash> sockets_by_peer_endpoint;
+#if defined(_MSC_VER) && _MSC_FULL_VER < 190000000
 static __declspec(thread) utp_crust_socket last_socket_id;
 #else
 static thread_local utp_crust_socket last_socket_id;
 #endif
 static std::unique_ptr<worker_thread_t> worker_thread;
+
 struct socket_info : std::enable_shared_from_this<socket_info>
 {
   utp_crust_socket id;
   socket_type h;
-  unsigned short port;
-  bool connected, already_sending;
+  unsigned short port;                // Locally bound listening port
+  struct sockaddr peer_endpoint;      // Peer connection
+  enum class connected_t
+  {
+    not_connected,
+    connecting,
+    connected
+  } connected;
+  bool send_queue_full, already_sending;
+  size_t last_send_queue_size;
   utp_socket *utph;
   utp_crust_event_callback callback;
   std::deque<std::pair<std::vector<unsigned char>, size_t>> send_queue;
-  socket_info(socket_type _h, unsigned short _port, utp_crust_event_callback _callback) : id(0), h(_h), port(_port), connected(false), already_sending(false), utph(nullptr), callback(_callback) { }
+  std::condition_variable send_queue_empty, socket_closed;
+  socket_info(socket_type _h, unsigned short _port, utp_crust_event_callback _callback)
+    : id(0), h(_h), port(_port), connected(connected_t::not_connected), send_queue_full(false), already_sending(false), last_send_queue_size(0),
+      utph(nullptr), callback(_callback)
+  {
+    memset(&peer_endpoint, 0, sizeof(peer_endpoint));
+  }
   ~socket_info()
   {
+    if (utph)
+    {
+      utp_destroy_unconnected_socket(utph);
+      utph = nullptr;
+    }
     if(h!=(socket_type)-1)
     {
       closesocket(h);
@@ -73,71 +153,111 @@ struct socket_info : std::enable_shared_from_this<socket_info>
   {
     if(utph)
     {
-#ifdef _DEBUG
+#ifdef LOGGING
       printf("Closing socket %d\n", id);
 #endif
-      int last_id=last_socket_id;
-      last_socket_id=id;
-      if(connected)
-        utp_close(utph);  // libutp will delete this when it gets rounds to it
-      else
-        utp_destroy_unconnected_socket(utph);
-      last_socket_id=last_id;
-      utph=nullptr;
+      if (connected != connected_t::not_connected)
+      {
+        auto _utph = utph;
+        utph = nullptr;
+        int last_id = last_socket_id;
+        last_socket_id = id;
+        utp_close(_utph);  // libutp will delete this when it gets rounds to it
+        last_socket_id = last_id;
+      }
     }
   }
   void fill_send_queue()
   {
-    if(!already_sending && !send_queue.empty())
+    assert(!(send_queue_full && send_queue.empty()));
+    if (!send_queue.empty())
     {
-      std::vector<utp_iovec> vecs;
-      ssize_t written=0;
-      do
+      if (already_sending)
+        fprintf(stderr, "WARNING: Reentered fill_send_queue()!\n");
+      else
       {
-        vecs.clear();
-        vecs.reserve(send_queue.size());
-        for(auto &i : send_queue)
+        if (!send_queue_full)
         {
-          vecs.push_back({ i.first.data()+i.second, i.first.size()-i.second });
-#ifdef _DEBUG
-          printf("About to send on socket %d %p-%u (+%u)\n", id, vecs.back().iov_base, (unsigned) vecs.back().iov_len, (unsigned) i.second);
-#endif
-        }
-        already_sending=true;
-        last_socket_id = id;
-        written=utp_writev(utph, vecs.data(), vecs.size());
-        last_socket_id = 0;
-        already_sending=false;
-#ifdef _DEBUG
-        printf("Sent %d bytes\n", (int) written);
-#endif
-        if(written<=0)
-          break;
-        assert(!send_queue.empty());
-        while(written>0)
-        {
-          size_t thisbuffer=send_queue.front().first.size()-send_queue.front().second;
-          if(thisbuffer<=(size_t) written)
+          std::vector<utp_iovec> vecs;
+          ssize_t written = 0;
+          //do
           {
-            send_queue.pop_front();
-            if(send_queue.empty())
-              break;
-            written-=thisbuffer;
-          }
-          else
+            vecs.clear();
+            vecs.reserve(send_queue.size());
+            for (auto &i : send_queue)
+            {
+              vecs.push_back({ i.first.data() + i.second, i.first.size() - i.second });
+#ifdef LOGGING
+              //printf("About to send on socket %d %p-%u (+%u)\n", id, vecs.back().iov_base, (unsigned) vecs.back().iov_len, (unsigned) i.second);
+#endif
+            }
+            already_sending = true;
+            int old_id = last_socket_id;
+            last_socket_id = id;
+            written = utp_writev(utph, vecs.data(), vecs.size());
+            last_socket_id = old_id;
+            already_sending = false;
+#ifdef LOGGING
+            printf("Sent %d bytes\n", (int) written);
+#endif
+            if (written <= 0)
+            {
+              send_queue_full = true;
+              goto done;
+            }
+            assert(!send_queue.empty());
+            while (written > 0)
+            {
+              size_t thisbuffer = send_queue.front().first.size() - send_queue.front().second;
+              if (thisbuffer <= (size_t)written)
+              {
+                send_queue.pop_front();
+                if (send_queue.empty())
+                {
+                  send_queue_full = false;
+                  send_queue_empty.notify_all();
+                  break;
+                }
+                written -= thisbuffer;
+              }
+              else
+              {
+                send_queue.front().second += written;
+                written = 0;
+              }
+            }
+          } //while (!send_queue.empty());
+done:
+          size_t totalbytes = 0;
+          for (auto &i : send_queue)
+            totalbytes += i.first.size() - i.second;
+          if (last_send_queue_size != totalbytes)
           {
-            send_queue.front().second+=written;
-            written=0;
+            callback(id, UTP_CRUST_SEND_QUEUE_STATUS, nullptr, totalbytes);
+            last_send_queue_size = totalbytes;
           }
         }
-      } while(!send_queue.empty());
-      size_t totalbytes=0;
-      for(auto &i : send_queue)
-        totalbytes+=i.first.size()-i.second;
-      callback(id, UTP_CRUST_SEND_QUEUE_STATUS, nullptr, totalbytes);
+      }
     }
   }
 };
+
+static int _do_connect(std::shared_ptr<socket_info> si, const struct sockaddr *addr, socklen_t len)
+{
+  si->connected = socket_info::connected_t::connecting;
+  last_socket_id = si->id;
+  int ret = utp_connect(si->utph, addr, len);
+  last_socket_id = 0;
+  if (-1 != ret)
+  {
+    memcpy(&si->peer_endpoint, addr, sizeof(si->peer_endpoint));
+    sockets_by_peer_endpoint.insert(std::make_pair(*addr, si));
+  }
+  else
+    si->connected = socket_info::connected_t::not_connected;
+  return ret;
+}
+
 struct worker_thread_t
 {
   bool done;
@@ -148,19 +268,38 @@ struct worker_thread_t
 #endif
   utp_context *ctx;
   std::unique_ptr<std::thread> threadh;
-  static void find_socket(std::shared_ptr<socket_info> &si, utp_crust_socket &id, utp_socket *s)
+  /* libutp was written around there being one UDP socket and multiplexing connections across that one socket.
+  As a result, it forgets to say which socket a callback refers to a lot of the time, and we need to tag using
+  thread local data what some callback means, hence this find_socket complexity.
+  */
+  static void find_socket(std::shared_ptr<socket_info> &si, utp_crust_socket &id, utp_callback_arguments *args)
   {
     id=0;
-    auto it(sockets_by_utpsocket.find(s));
+    // First try to lookup this callback by socket
+    auto it(sockets_by_utpsocket.find(args->socket));
     if(it==sockets_by_utpsocket.end())
     {
+      // If that failed (e.g. internal socket), try looking up by thread local data
       if(!sockets_by_id.empty())
       {
         id=last_socket_id;
         if (id)
           si = sockets_by_id[id];
+        else if (args->callback_type != UTP_ON_STATE_CHANGE && args->callback_type!= UTP_ON_ERROR)
+        {
+          fprintf(stderr, "WARNING: Had to look up by peer endpoint for callback %s\n", utp_callback_names[args->callback_type]);
+          // If thread local data not set (e.g. timeouts), look up by destination endpoint
+          auto it(sockets_by_peer_endpoint.find(*args->address));
+          if (it == sockets_by_peer_endpoint.end())
+            abort(); // si = sockets_by_id.begin()->second;
+          si = it->second;
+          id = si->id;
+        }
         else
-          abort(); // si = sockets_by_id.begin()->second;
+        {
+          fprintf(stderr, "FATAL: Could not deduce correct socket for callback %s\n", utp_callback_names[args->callback_type]);
+          abort();
+        }
       }
     }
     else
@@ -173,9 +312,9 @@ struct worker_thread_t
   {
     std::shared_ptr<socket_info> si;
     utp_crust_socket id;
-    find_socket(si, id, args->socket);
-#ifdef _DEBUG
-    printf("sendto args->socket=%p fromid=%d packet type=%x conn_id=%u\n", args->socket, id, *args->buf, args->buf[3]);
+    find_socket(si, id, args);
+#ifdef LOGGING
+    //printf("sendto args->socket=%p fromid=%d packet type=%x conn_id=%u\n", args->socket, id, *args->buf, args->buf[3]);
 #endif
     if(!si)
     {
@@ -185,13 +324,13 @@ struct worker_thread_t
     }
     socket_type h=si->h;
     // Allow reads during sends
-    sockets_lock.unlock();
+    sockets_lock->unlock();
     if(-1==sendto(h, (const char *) args->buf, args->len, 0, args->address, args->address_len))
     {
       fprintf(stderr, "utp sendto failed with errno %d, ignoring\n", errno);
       // TODO: Should I check for EWOULDBLOCK and yield and retry?
     }
-    sockets_lock.lock();
+    sockets_lock->lock();
     return 0;
   }
   static uint64 invoke_utp_callback(utp_callback_arguments *args)
@@ -214,6 +353,7 @@ struct worker_thread_t
       throw std::runtime_error("Failed to init utp");
     utp_context_set_userdata(ctx, this);
     utp_set_callback(ctx, UTP_SENDTO, &sendto_impl);
+    utp_set_callback(ctx, UTP_ON_FIREWALL, &invoke_utp_callback);
     utp_set_callback(ctx, UTP_ON_ERROR, &invoke_utp_callback);
     utp_set_callback(ctx, UTP_ON_STATE_CHANGE, &invoke_utp_callback);
     utp_set_callback(ctx, UTP_ON_READ, &invoke_utp_callback);
@@ -251,29 +391,79 @@ struct worker_thread_t
   }
   uint64 utp_callback(utp_callback_arguments *args)
   {
-#ifdef _DEBUG
-    printf("utp_callback args->socket=%p\n", args->socket);
+#ifdef LOGGING
+    printf("utp_callback args->socket=%p last_socket_id=%d\n", args->socket, last_socket_id);
 #endif
     std::shared_ptr<socket_info> si;
     utp_crust_socket id;
-    find_socket(si, id, args->socket);
+    find_socket(si, id, args);
     if(!si)
     {
       fprintf(stderr, "WARNING: utp_crust callback handler called when all sockets are destroyed\n");
+      return 0;
     }
     switch(args->callback_type)
     {
+      case UTP_ON_FIREWALL:
+      {
+#ifdef LOGGING
+        printf("Incoming new connection for socket id %d\n", id);
+#endif
+        if (si)
+        {
+          switch (si->connected)
+          {
+            // Reciprocate connection if I am listening
+            case socket_info::connected_t::not_connected:
+              if (_do_connect(si, args->address, args->address_len) >= 0)
+              {
+#ifdef LOGGING
+                printf("Reciprocating connection to listening socket\n");
+#endif
+                si->connected = socket_info::connected_t::connected;
+                return 0;  // Accept
+              }
+              else
+              {
+                fprintf(stderr, "WARNING: Rejecting incoming connection as failed to reciprocate connection\n");
+                return 1;
+              }
+            // Reciprocate connection if I am listening
+            case socket_info::connected_t::connecting:
+#ifdef LOGGING
+              printf("Allowing reciprocated connection from listening socket\n");
+#endif
+              si->connected = socket_info::connected_t::connected;
+              return 0;
+            default:
+              // Is this a reconnect from the current connection? If not, reject
+              auto it(sockets_by_peer_endpoint.find(*args->address));
+              if (it != sockets_by_peer_endpoint.end() && it->second == si)
+              {
+#ifdef LOGGING
+                printf("Reallowing reconnect from previously connected endpoint\n");
+#endif
+                return 0;
+              }
+              fprintf(stderr, "WARNING: Rejecting incoming connection from new peer on already connected socket\n");
+              return 1;
+          }
+        }
+        fprintf(stderr, "WARNING: Rejecting incoming connection as unknown socket\n");
+        return 1;  // Reject
+      }
       case UTP_ON_ACCEPT:
       {
-#ifdef _DEBUG
+#ifdef LOGGING
         printf("Accepted new connection for socket id %d\n", id);
 #endif
-        if(si) si->callback(id, UTP_CRUST_NEW_CONNECTION, args->address, args->address_len);
+        if (si)
+          si->callback(id, UTP_CRUST_NEW_CONNECTION, args->address, args->address_len);
         break;
       }
       case UTP_ON_ERROR:
       {
-#ifdef _DEBUG
+#ifdef LOGGING
         printf("Error on socket id %d\n", id);
 #endif
         if(si)
@@ -285,13 +475,13 @@ struct worker_thread_t
       }
       case UTP_ON_READ:
       {
-#ifdef _DEBUG
+#ifdef LOGGING
         printf("New data on socket id %d\n", id);
 #endif
         if(si)
         {
           si->callback(id, UTP_CRUST_NEW_MESSAGE, args->buf, args->len);
-          if(si->connected)
+          if(si->connected!= socket_info::connected_t::not_connected)
             utp_read_drained(si->utph);
         }
         break;
@@ -301,18 +491,21 @@ struct worker_thread_t
         switch(args->state)
         {
           case UTP_STATE_CONNECT:
-#ifdef _DEBUG
+#ifdef LOGGING
             printf("Connected on socket id %d\n", id);
 #endif
+            if (si)
+              si->send_queue_full = false;
             break;
           case UTP_STATE_WRITABLE:
-#ifdef _DEBUG
+#ifdef LOGGING
             printf("Now writable on socket id %d\n", id);
 #endif
-            if(si) si->fill_send_queue();
+            if (si)
+              si->send_queue_full = false;
             break;
           case UTP_STATE_EOF:
-#ifdef _DEBUG
+#ifdef LOGGING
             printf("EOF on socket id %d\n", id);
 #endif
             if(si)
@@ -322,26 +515,34 @@ struct worker_thread_t
             }
             break;
           case UTP_STATE_DESTROYING:
-#ifdef _DEBUG
+#ifdef LOGGING
             printf("Destroying socket id %d\n", id);
 #endif
-            if(si) si->callback(id, UTP_CRUST_SOCKET_CLEANUP, nullptr, 0);
+            assert(si);
+            if (si)
+            {
+              si->callback(id, UTP_CRUST_SOCKET_CLEANUP, nullptr, 0);
+              if(si->connected!= socket_info::connected_t::not_connected)
+                sockets_by_peer_endpoint.erase(si->peer_endpoint);
+            }
             sockets_by_utpsocket.erase(args->socket);
             sockets_by_id.erase(id);
-#ifdef _DEBUG
+#ifdef LOGGING
             printf("sockets remaining = %u,%u\n", (unsigned) sockets_by_utpsocket.size(), (unsigned) sockets_by_id.size());
 #endif
+            if (si)
+              si->socket_closed.notify_all();
             if(sockets_by_id.empty())
             {
-#ifdef _DEBUG
+#ifdef LOGGING
               printf("No more sockets, so closing down UTP worker thread\n");
 #endif
               done=true;
-              std::async(std::launch::async, []{
-                std::unique_lock<decltype(sockets_lock)> h(sockets_lock);
+              std::thread([]{
+                std::unique_lock<std::mutex> h(*sockets_lock);
                 if(sockets_by_id.empty() && worker_thread)
                 {
-#ifdef _DEBUG
+#ifdef LOGGING
                   printf("No more sockets, so destroying UTP worker thread\n");
 #endif
                   if(worker_thread->threadh)
@@ -351,7 +552,7 @@ struct worker_thread_t
                   }
                   worker_thread.reset();
                 }
-              });
+              }).detach();
             }
             break;
         }
@@ -366,19 +567,19 @@ struct worker_thread_t
     struct sockaddr_in src_addr;
     socklen_t addrlen = sizeof(src_addr);
     ssize_t len;
-#ifdef _DEBUG
+#ifdef LOGGING
     printf("UTP worker thread launched\n");
 #endif
     while(!done)
     {
       std::vector<std::shared_ptr<socket_info>> sis;
       {
-        std::lock_guard<decltype(sockets_lock)> h(sockets_lock);
+        std::lock_guard<std::mutex> h(*sockets_lock);
         sis.reserve(sockets_by_id.size());
         for(auto &i : sockets_by_id)
         {
-          if(i.second->utph)
-            sis.push_back(i.second);
+          i.second->fill_send_queue();
+          sis.push_back(i.second);
         }
       }
 #ifdef WIN32
@@ -391,7 +592,7 @@ struct worker_thread_t
       }
       if((len = (ssize_t) WaitForMultipleObjects(2, canceller, false, 500))>0)
       {
-#ifdef _DEBUG
+#ifdef LOGGING
         printf("UTP worker poll returns %d, updated=%d\n", (int)len, len==0);
 #endif
         if(len==0)
@@ -406,7 +607,7 @@ struct worker_thread_t
             if (!toread)
               continue;
             last_socket_id = si->id;
-            std::lock_guard<decltype(sockets_lock)> h(sockets_lock);
+            std::lock_guard<std::mutex> h(*sockets_lock);
             do
             {
               memset(&src_addr, 0, sizeof(src_addr));
@@ -419,12 +620,12 @@ struct worker_thread_t
       buf.push_back({canceller[0], POLLIN, 0});
       for(auto &si : sis)
         buf.push_back({si->h, POLLIN, 0});
-#ifdef _DEBUG
+#ifdef LOGGING
       printf("UTP worker thread polls %u fds\n", (unsigned) buf.size());
 #endif
       if((len=poll(buf.data(), buf.size(), 1000))>0)
       {
-#ifdef _DEBUG
+#ifdef LOGGING
         printf("UTP worker poll returns %d, updated=%d\n", (int) len, !!(buf.front().revents & POLLIN));
 #endif
         if(buf.front().revents & POLLIN)
@@ -436,10 +637,10 @@ struct worker_thread_t
           if(buf[n].revents & POLLIN)
           {
             last_socket_id=sis[n-1]->id;
-#ifdef _DEBUG
+#ifdef LOGGING
             printf("UTP worker thread sees read on socket id %d\n", sis[n-1]->id);
 #endif
-            std::lock_guard<decltype(sockets_lock)> h(sockets_lock);
+            std::lock_guard<std::mutex> h(*sockets_lock);
             do
             {
               len=recvfrom(buf[n].fd, buffer, sizeof(buffer), MSG_DONTWAIT, (struct sockaddr *)&src_addr, &addrlen);
@@ -452,10 +653,10 @@ struct worker_thread_t
           }
         }
       }
-      std::lock_guard<decltype(sockets_lock)> h(sockets_lock);
+      std::lock_guard<std::mutex> h(*sockets_lock);
       utp_check_timeouts(ctx);
     }
-#ifdef _DEBUG
+#ifdef LOGGING
     printf("UTP worker thread shutdown\n");
 #endif
   }
@@ -485,14 +686,14 @@ extern "C" int utp_crust_create_socket(utp_crust_socket *id, unsigned short *por
   try
   {
     auto newsocket=std::make_shared<socket_info>(h, *port, callback);
-    std::lock_guard<decltype(sockets_lock)> h(sockets_lock);
+    std::lock_guard<std::mutex> h(*sockets_lock);
     bool bootstrapping=!worker_thread;
     if(bootstrapping)
       worker_thread=std::make_unique<worker_thread_t>();
     if(!(newsocket->utph=utp_create_socket(worker_thread->ctx)))
       throw std::runtime_error("Failed to create UTP socket");
     *id=newsocket->id=++socket_id;
-#ifdef _DEBUG
+#ifdef LOGGING
     printf("UTP create socket id %d (addr=%p) uses port %d\n", *id, newsocket.get(), *port);
 #endif
     try
@@ -525,24 +726,20 @@ extern "C" int utp_crust_create_socket(utp_crust_socket *id, unsigned short *por
 // Connect a socket to an endpoint
 extern "C" int utp_crust_connect(utp_crust_socket id, const struct sockaddr *addr, socklen_t len)
 {
-  std::unique_lock<decltype(sockets_lock)> h(sockets_lock);
+  std::unique_lock<std::mutex> h(*sockets_lock);
   auto it=sockets_by_id.find(id);
   if(it==sockets_by_id.end())
   {
     errno=EINVAL;
     return -1;
   }
-  last_socket_id=id;
-  int ret=utp_connect(it->second->utph, addr, len);
-  it->second->connected=true;
-  last_socket_id=0;
-  return ret;
+  return _do_connect(it->second, addr, len);
 }
 
 // Sends data
 extern "C" int utp_crust_send(utp_crust_socket id, const void *buf, size_t bytes)
 {
-  std::unique_lock<decltype(sockets_lock)> h(sockets_lock);
+  std::unique_lock<std::mutex> h(*sockets_lock);
   auto it=sockets_by_id.find(id);
   if(it==sockets_by_id.end())
   {
@@ -551,18 +748,46 @@ extern "C" int utp_crust_send(utp_crust_socket id, const void *buf, size_t bytes
   }
   std::vector<unsigned char> vec(bytes);
   memcpy(vec.data(), buf, bytes);
+  bool was_empty = it->second->send_queue.empty();
   it->second->send_queue.push_back(std::make_pair(vec, 0));
-  it->second->fill_send_queue();
+  if (was_empty)
+    worker_thread->updated();
   return (int) bytes;
 }
 
-// Destroy a previously created socket, closing down any background libutp pumping thread as needed
-extern "C" int utp_crust_destroy_socket(utp_crust_socket id)
+// Flushes pending send data
+extern "C" int utp_crust_flush(utp_crust_socket id)
 {
-  std::unique_lock<decltype(sockets_lock)> h(sockets_lock);
+  std::unique_lock<std::mutex> h(*sockets_lock);
+  auto it = sockets_by_id.find(id);
+  if (it == sockets_by_id.end())
+  {
+    errno = EINVAL;
+    return -1;
+  }
+  auto si(it->second);
+  if (!si->send_queue.empty())
+  {
+    si->send_queue_empty.wait(h, [&si] { return si->send_queue.empty(); });
+  }
+  return 0;
+}
+
+// Destroy a previously created socket, closing down any background libutp pumping thread as needed
+extern "C" int utp_crust_destroy_socket(utp_crust_socket id, int wait)
+{
+  std::unique_lock<std::mutex> h(*sockets_lock);
   auto it=sockets_by_id.find(id);
   // Sockets can get destroyed asynchronously, so don't fail if not found.
-  if(it!=sockets_by_id.end())
-    it->second->close();
+  if (it != sockets_by_id.end())
+  {
+    auto si(it->second);
+    if (!si->send_queue.empty())
+      si->send_queue.clear();
+    si->close();
+    if (wait)
+      si->socket_closed.wait(h, [id] { return sockets_by_id.find(id)!= sockets_by_id.end(); });
+    h.unlock();
+  }
   return 0;
 }
