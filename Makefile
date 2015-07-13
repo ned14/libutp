@@ -1,6 +1,6 @@
 OBJS     = utp_internal.o utp_utils.o utp_hash.o utp_callbacks.o utp_api.o utp_packedsockaddr.o utp_crust.o
 CFLAGS   = -Wall -DPOSIX -g
-CXXFLAGS = $(CFLAGS) -fPIC -std=c++11 -sanitize=undefined
+CXXFLAGS = $(CFLAGS) -fPIC -std=c++11 -fsanitize=undefined
 #CC       = gcc
 #CXX      = g++ 
 
