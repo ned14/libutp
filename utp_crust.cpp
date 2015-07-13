@@ -199,7 +199,7 @@ struct socket_info : std::enable_shared_from_this<socket_info>
             last_socket_id = old_id;
             already_sending = false;
 #ifdef LOGGING
-            printf("Sent %d bytes\n", (int) written);
+            //printf("Sent %d bytes\n", (int) written);
 #endif
             if (written <= 0)
             {
@@ -387,13 +387,13 @@ struct worker_thread_t
     SetEvent(canceller[0]);
 #else
     char c=0;
-    write(canceller[1], &c, 1);
+    (void) write(canceller[1], &c, 1);
 #endif
   }
   uint64 utp_callback(utp_callback_arguments *args)
   {
 #ifdef LOGGING
-    printf("utp_callback args->socket=%p last_socket_id=%d\n", args->socket, last_socket_id);
+    //printf("utp_callback args->socket=%p last_socket_id=%d\n", args->socket, last_socket_id);
 #endif
     std::shared_ptr<socket_info> si;
     utp_crust_socket id;
@@ -470,19 +470,20 @@ struct worker_thread_t
         if(si)
         {
           si->callback(id, UTP_CRUST_LOST_CONNECTION, args->address, args->address_len);
-          si->close();
+          if(si->connected!= socket_info::connected_t::not_connected)
+            si->close();
         }
         break;
       }
       case UTP_ON_READ:
       {
 #ifdef LOGGING
-        printf("New data on socket id %d\n", id);
+        //printf("New data on socket id %d\n", id);
 #endif
         if(si)
         {
           si->callback(id, UTP_CRUST_NEW_MESSAGE, args->buf, args->len);
-          if(si->connected!= socket_info::connected_t::not_connected)
+          if(si->connected!= socket_info::connected_t::not_connected && si->utph)
             utp_read_drained(si->utph);
         }
         break;
@@ -500,7 +501,7 @@ struct worker_thread_t
             break;
           case UTP_STATE_WRITABLE:
 #ifdef LOGGING
-            printf("Now writable on socket id %d\n", id);
+            //printf("Now writable on socket id %d\n", id);
 #endif
             if (si)
               si->send_queue_full = false;
@@ -512,7 +513,8 @@ struct worker_thread_t
             if(si)
             {
               si->callback(id, UTP_CRUST_LOST_CONNECTION, args->address, args->address_len);
-              si->close();
+              //if(si->connected!= socket_info::connected_t::not_connected)
+              //  si->close();
             }
             break;
           case UTP_STATE_DESTROYING:
@@ -594,7 +596,7 @@ struct worker_thread_t
       if((len = (ssize_t) WaitForMultipleObjects(2, canceller, false, 500))>0)
       {
 #ifdef LOGGING
-        printf("UTP worker poll returns %d, updated=%d\n", (int)len, len==0);
+        //printf("UTP worker poll returns %d, updated=%d\n", (int)len, len==0);
 #endif
         if(len==0)
           ResetEvent(canceller[0]);
@@ -622,12 +624,12 @@ struct worker_thread_t
       for(auto &si : sis)
         buf.push_back({si->h, POLLIN, 0});
 #ifdef LOGGING
-      printf("UTP worker thread polls %u fds\n", (unsigned) buf.size());
+      //printf("UTP worker thread polls %u fds\n", (unsigned) buf.size());
 #endif
       if((len=poll(buf.data(), buf.size(), 1000))>0)
       {
 #ifdef LOGGING
-        printf("UTP worker poll returns %d, updated=%d\n", (int) len, !!(buf.front().revents & POLLIN));
+        //printf("UTP worker poll returns %d, updated=%d\n", (int) len, !!(buf.front().revents & POLLIN));
 #endif
         if(buf.front().revents & POLLIN)
         {
@@ -639,7 +641,7 @@ struct worker_thread_t
           {
             last_socket_id=sis[n-1]->id;
 #ifdef LOGGING
-            printf("UTP worker thread sees read on socket id %d\n", sis[n-1]->id);
+            //printf("UTP worker thread sees read on socket id %d\n", sis[n-1]->id);
 #endif
             std::lock_guard<std::mutex> h(*sockets_lock);
             do
