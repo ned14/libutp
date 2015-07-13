@@ -1,0 +1,18 @@
+{
+   vfprintf1
+   Memcheck:Cond
+   fun:vfprintf
+}
+{
+   vfprint2
+   Memcheck:Value8
+   fun:_itoa_word
+   fun:vfprintf
+}
+{
+   vfprintf3
+   Memcheck:Cond
+   fun:_itoa_word
+   fun:vfprintf
+}
+
