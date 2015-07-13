@@ -2,16 +2,21 @@ OBJS     = utp_internal.o utp_utils.o utp_hash.o utp_callbacks.o utp_api.o utp_p
 CFLAGS   = -Wall -DPOSIX -g
 CXXFLAGS = $(CFLAGS) -fPIC
 CC       = gcc
-CXX      = g++-5 -std=c++14
+CXX      = g++ -std=c++0x -sanitize=undefined
 
 CXXFLAGS += -Wno-sign-compare
 CXXFLAGS += -fpermissive -pthread
 
+debug: CXXFLAGS += -D_DEBUG -g
+debug: CCFLAGS += -D_DEBUG -g
+all: CXXFLAGS += -O3 -DNDEBUG -g
+all: CCFLAGS += -O3 -DNDEBUG -g
+
 # Uncomment to enable utp_get_stats(), and a few extra sanity checks
-CFLAGS += -D_DEBUG
+#CFLAGS += -D_DEBUG
 
 # Uncomment to enable debug logging
-CFLAGS += -DUTP_DEBUG_LOGGING
+#CFLAGS += -DUTP_DEBUG_LOGGING
 
 # Dynamically determine if librt is available.  If so, assume we need to link
 # against it for clock_gettime(2).  This is required for clean builds on OSX;
@@ -23,6 +28,7 @@ ifeq ($(strip $(lrt)),0)
 endif
 
 all: libutp.so libutp.a ucat ucat-static test_utp_crust
+debug: libutp.so libutp.a ucat ucat-static test_utp_crust
 
 libutp.so: $(OBJS)
 	$(CXX) $(CXXFLAGS) -o libutp.so -shared $(OBJS)

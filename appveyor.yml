@@ -1,0 +1,5 @@
+version: 1.0.{build}
+build:
+  project: libutp_crust.sln
+  verbosity: minimal
+  
