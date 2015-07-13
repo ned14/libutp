@@ -1,5 +1,7 @@
 version: 1.0.{build}
 os: Visual Studio 2015 RC
+configuration: Debug
+platform: x86
 build:
   project: libutp_crust.sln
   verbosity: minimal
