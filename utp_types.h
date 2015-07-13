@@ -104,6 +104,10 @@ typedef long long int64;
 CASSERT(8 == sizeof(uint64), sizeof_uint64_is_8)
 CASSERT(8 == sizeof(int64), sizeof_int64_is_8)
 
+#ifndef INT64_MAX
+#define INT64_MAX        9223372036854775807LL
+#endif
+
 // always ANSI
 typedef const char * cstr;
 typedef char * str;
