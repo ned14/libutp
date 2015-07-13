@@ -37,6 +37,7 @@ using socket_type = SOCKET;
 #else
 # include <fcntl.h>
 # include <poll.h>
+# include <sys/ioctl.h>
 using socket_type = int;
 # define closesocket(h) ::close(h)
 #endif
