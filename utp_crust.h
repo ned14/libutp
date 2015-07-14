@@ -65,7 +65,7 @@ extern int utp_crust_send(utp_crust_socket socket, const void *buf, size_t bytes
 extern int utp_crust_flush(utp_crust_socket socket);
 
 // Destroy a previously created socket, closing down any background libutp pumping thread as needed
-extern int utp_crust_destroy_socket(utp_crust_socket socket, int flush);
+extern int utp_crust_destroy_socket(utp_crust_socket socket, int wait);
 
 #ifdef __cplusplus
 }
