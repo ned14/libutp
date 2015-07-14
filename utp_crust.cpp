@@ -736,6 +736,25 @@ extern "C" int utp_crust_create_socket(utp_crust_socket *id, unsigned short *por
   }
 }
 
+// Set private data for a socket
+extern "C" void utp_crust_set_data(utp_crust_socket id, void *data)
+{
+  std::unique_lock<std::mutex> h(*sockets_lock);
+  auto it=sockets_by_id.find(id);
+  if(it!=sockets_by_id.end())
+    it->second->data=data;
+}
+
+// Get private data for a socket
+extern "C" void *utp_crust_get_data(utp_crust_socket id)
+{
+  std::unique_lock<std::mutex> h(*sockets_lock);
+  auto it=sockets_by_id.find(id);
+  if(it!=sockets_by_id.end())
+    return it->second->data;
+  return nullptr;
+}
+
 // Connect a socket to an endpoint
 extern "C" int utp_crust_connect(utp_crust_socket id, const struct sockaddr *addr, socklen_t len)
 {

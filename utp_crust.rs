@@ -26,6 +26,10 @@ extern "C" {
                                    callback: utp_crust_event_callback,
                                    privdata: *mut ::libc::c_void)
      -> ::libc::c_int;
+    pub fn utp_crust_set_data(socket: utp_crust_socket,
+                              data: *mut ::libc::c_void) -> ();
+    pub fn utp_crust_get_data(socket: utp_crust_socket)
+     -> *mut ::libc::c_void;
     pub fn utp_crust_connect(socket: utp_crust_socket,
                              addr: *const sockaddr, len: socklen_t)
      -> ::libc::c_int;

@@ -62,6 +62,12 @@ typedef enum utp_crust_flags_t
 // callback will be called with events as needed.
 extern int utp_crust_create_socket(utp_crust_socket *socket, unsigned short *port, unsigned int flags, utp_crust_event_callback callback, void *privdata);
 
+// Set private data for a socket
+extern void utp_crust_set_data(utp_crust_socket socket, void *data);
+
+// Get private data for a socket
+extern void *utp_crust_get_data(utp_crust_socket socket);
+
 // Connect a socket to an endpoint
 extern int utp_crust_connect(utp_crust_socket socket, const struct sockaddr *addr, socklen_t len);
 
