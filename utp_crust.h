@@ -34,7 +34,7 @@ extern "C" {
 
 typedef int utp_crust_socket;
 
-typedef enum event_code_t
+typedef enum utp_crust_event_code_t
 {
   // Sent when a socket is being destroyed
   UTP_CRUST_SOCKET_CLEANUP,
@@ -46,14 +46,21 @@ typedef enum event_code_t
   UTP_CRUST_NEW_MESSAGE,       // data=message, bytes=length
   // Sent when the send queue has changed
   UTP_CRUST_SEND_QUEUE_STATUS  // bytes=bytes in queue
-} event_code;
+} utp_crust_event_code;
 
 // The callback invoked when things happen on your socket
-typedef void (*utp_crust_event_callback)(utp_crust_socket socket, event_code ev, const void *data, size_t bytes);
+typedef void (*utp_crust_event_callback)(utp_crust_socket socket, utp_crust_event_code ev, const void *data, size_t bytes, void *privdata);
+
+// Flags for creating sockets
+typedef enum utp_crust_flags_t
+{
+  // Only listen for new connections, closing immediately after callback
+  UTP_CRUST_LISTEN=1
+} utp_crust_flags;
 
 // Create a socket on the port suggested, launching a background libutp pumping thread if needed
 // callback will be called with events as needed.
-extern int utp_crust_create_socket(utp_crust_socket *socket, unsigned short *port, utp_crust_event_callback callback);
+extern int utp_crust_create_socket(utp_crust_socket *socket, unsigned short *port, unsigned int flags, utp_crust_event_callback callback, void *privdata);
 
 // Connect a socket to an endpoint
 extern int utp_crust_connect(utp_crust_socket socket, const struct sockaddr *addr, socklen_t len);

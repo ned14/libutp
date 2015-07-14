@@ -23,7 +23,7 @@
 
 static std::promise<size_t> bytes_received;
 static size_t socketstogo;
-void handler(utp_crust_socket socket, event_code ev, const void *data, size_t bytes)
+void handler(utp_crust_socket socket, utp_crust_event_code ev, const void *data, size_t bytes, void *privdata)
 {
   static size_t _bytes_received;
   switch(ev)
@@ -57,9 +57,9 @@ CATCH_TEST_CASE( "utp_crust works", "[utp_crust]" )
   utp_crust_socket listener, connecter;
   unsigned short port;
   port=0;
-  CATCH_REQUIRE(utp_crust_create_socket(&connecter, &port, handler)==0);
+  CATCH_REQUIRE(utp_crust_create_socket(&connecter, &port, 0, handler, nullptr)==0);
   port=0;
-  CATCH_REQUIRE(utp_crust_create_socket(&listener, &port, handler)==0);
+  CATCH_REQUIRE(utp_crust_create_socket(&listener, &port, 0, handler, nullptr)==0);
   struct sockaddr_in addr={AF_INET, htons(port)};
   addr.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
   CATCH_REQUIRE(utp_crust_connect(connecter, (sockaddr *) &addr, sizeof(addr))==0);

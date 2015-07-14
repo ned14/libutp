@@ -117,6 +117,7 @@ struct socket_info : std::enable_shared_from_this<socket_info>
   utp_crust_socket id;
   socket_type h;
   unsigned short port;                // Locally bound listening port
+  unsigned int flags;
   struct sockaddr peer_endpoint;      // Peer connection
   enum class connected_t
   {
@@ -128,11 +129,12 @@ struct socket_info : std::enable_shared_from_this<socket_info>
   size_t last_send_queue_size;
   utp_socket *utph;
   utp_crust_event_callback callback;
+  void *data;
   std::deque<std::pair<std::vector<unsigned char>, size_t>> send_queue;
   std::condition_variable send_queue_empty, socket_closed;
-  socket_info(socket_type _h, unsigned short _port, utp_crust_event_callback _callback)
-    : id(0), h(_h), port(_port), connected(connected_t::not_connected), send_queue_full(false), already_sending(false), last_send_queue_size(0),
-      utph(nullptr), callback(_callback)
+  socket_info(socket_type _h, unsigned short _port, unsigned int _flags, utp_crust_event_callback _callback, void *_data)
+    : id(0), h(_h), port(_port), flags(_flags), connected(connected_t::not_connected), send_queue_full(false), already_sending(false), last_send_queue_size(0),
+      utph(nullptr), callback(_callback), data(_data)
   {
     memset(&peer_endpoint, 0, sizeof(peer_endpoint));
   }
@@ -234,7 +236,7 @@ done:
             totalbytes += i.first.size() - i.second;
           if (last_send_queue_size != totalbytes)
           {
-            callback(id, UTP_CRUST_SEND_QUEUE_STATUS, nullptr, totalbytes);
+            callback(id, UTP_CRUST_SEND_QUEUE_STATUS, nullptr, totalbytes, data);
             last_send_queue_size = totalbytes;
           }
         }
@@ -412,7 +414,15 @@ struct worker_thread_t
 #endif
         if (si)
         {
-          switch (si->connected)
+          if(si->flags & UTP_CRUST_LISTEN)
+          {
+#ifdef LOGGING
+            printf("Listening socket id %d new connection\n", id);
+#endif
+            si->callback(id, UTP_CRUST_NEW_CONNECTION, args->address, args->address_len, si->data);
+            return 1;  // Reject
+          }
+          else switch (si->connected)
           {
             // Reciprocate connection if I am listening
             case socket_info::connected_t::not_connected:
@@ -459,7 +469,7 @@ struct worker_thread_t
         printf("Accepted new connection for socket id %d\n", id);
 #endif
         if (si)
-          si->callback(id, UTP_CRUST_NEW_CONNECTION, args->address, args->address_len);
+          si->callback(id, UTP_CRUST_NEW_CONNECTION, args->address, args->address_len, si->data);
         break;
       }
       case UTP_ON_ERROR:
@@ -469,7 +479,7 @@ struct worker_thread_t
 #endif
         if(si)
         {
-          si->callback(id, UTP_CRUST_LOST_CONNECTION, args->address, args->address_len);
+          si->callback(id, UTP_CRUST_LOST_CONNECTION, args->address, args->address_len, si->data);
           if(si->connected!= socket_info::connected_t::not_connected)
             si->close();
         }
@@ -482,7 +492,7 @@ struct worker_thread_t
 #endif
         if(si)
         {
-          si->callback(id, UTP_CRUST_NEW_MESSAGE, args->buf, args->len);
+          si->callback(id, UTP_CRUST_NEW_MESSAGE, args->buf, args->len, si->data);
           if(si->connected!= socket_info::connected_t::not_connected && si->utph)
             utp_read_drained(si->utph);
         }
@@ -512,7 +522,7 @@ struct worker_thread_t
 #endif
             if(si)
             {
-              si->callback(id, UTP_CRUST_LOST_CONNECTION, args->address, args->address_len);
+              si->callback(id, UTP_CRUST_LOST_CONNECTION, args->address, args->address_len, si->data);
               //if(si->connected!= socket_info::connected_t::not_connected)
               //  si->close();
             }
@@ -524,7 +534,7 @@ struct worker_thread_t
             assert(si);
             if (si)
             {
-              si->callback(id, UTP_CRUST_SOCKET_CLEANUP, nullptr, 0);
+              si->callback(id, UTP_CRUST_SOCKET_CLEANUP, nullptr, 0, si->data);
               if(si->connected!= socket_info::connected_t::not_connected)
                 sockets_by_peer_endpoint.erase(si->peer_endpoint);
             }
@@ -667,7 +677,7 @@ struct worker_thread_t
 
 // Create a socket on the port suggested, launching a background libutp pumping thread if needed
 // callback will be called with events as needed.
-extern "C" int utp_crust_create_socket(utp_crust_socket *id, unsigned short *port, utp_crust_event_callback callback)
+extern "C" int utp_crust_create_socket(utp_crust_socket *id, unsigned short *port, unsigned int flags, utp_crust_event_callback callback, void *data)
 {
   socket_type h=socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if(h==(socket_type)-1) return -1;
@@ -688,7 +698,7 @@ extern "C" int utp_crust_create_socket(utp_crust_socket *id, unsigned short *por
   *port=ntohs(res.sin_port);
   try
   {
-    auto newsocket=std::make_shared<socket_info>(h, *port, callback);
+    auto newsocket=std::make_shared<socket_info>(h, *port, flags, callback, data);
     std::lock_guard<std::mutex> h(*sockets_lock);
     bool bootstrapping=!worker_thread;
     if(bootstrapping)
