@@ -110,7 +110,7 @@ static __declspec(thread) utp_crust_socket last_socket_id;
 #else
 static thread_local utp_crust_socket last_socket_id;
 #endif
-static std::unique_ptr<worker_thread_t> worker_thread;
+static std::shared_ptr<worker_thread_t> worker_thread;
 
 struct socket_info : std::enable_shared_from_this<socket_info>
 {
@@ -157,7 +157,7 @@ struct socket_info : std::enable_shared_from_this<socket_info>
     if(utph)
     {
 #ifdef LOGGING
-      printf("Closing socket %d\n", id);
+      printf("Closing socket %d, socket=%d\n", id, connected);
 #endif
       if (connected != connected_t::not_connected)
       {
@@ -172,6 +172,8 @@ struct socket_info : std::enable_shared_from_this<socket_info>
   }
   void fill_send_queue()
   {
+    if(connected!=connected_t::connected)
+      return;
     assert(!(send_queue_full && send_queue.empty()));
     if (!send_queue.empty())
     {
@@ -236,7 +238,9 @@ done:
             totalbytes += i.first.size() - i.second;
           if (last_send_queue_size != totalbytes)
           {
+            sockets_lock->unlock();
             callback(id, UTP_CRUST_SEND_QUEUE_STATUS, nullptr, totalbytes, data);
+            sockets_lock->lock();
             last_send_queue_size = totalbytes;
           }
         }
@@ -251,6 +255,9 @@ static int _do_connect(std::shared_ptr<socket_info> si, const struct sockaddr *a
   last_socket_id = si->id;
   int ret = utp_connect(si->utph, addr, len);
   last_socket_id = 0;
+#ifdef LOGGING
+  printf("UTP connect socket id %d (addr=%p) to %x:%u returns %d\n", si->id, si.get(), ntohl(((const struct sockaddr_in *)addr)->sin_addr.s_addr), ntohs(((const struct sockaddr_in *)addr)->sin_port), ret);
+#endif
   if (-1 != ret)
   {
     memcpy(&si->peer_endpoint, addr, sizeof(si->peer_endpoint));
@@ -307,8 +314,11 @@ struct worker_thread_t
     }
     else
     {
-      si=it->second;
-      id=si->id;
+      if(!it->second->utph || args->socket==it->second->utph)
+      {
+        si=it->second;
+        id=si->id;
+      }
     }
   }
   static uint64 sendto_impl(utp_callback_arguments *args)
@@ -368,11 +378,13 @@ struct worker_thread_t
   worker_thread_t &operator=(const worker_thread_t &)=delete;
   ~worker_thread_t()
   {
+    std::unique_lock<std::mutex> h(*sockets_lock);
     if(threadh)
     {
       done=true;
       updated();
       threadh->join();
+      threadh.reset();
     }
 #ifdef WIN32
     CloseHandle(canceller[0]);
@@ -382,6 +394,7 @@ struct worker_thread_t
     close(canceller[1]);
 #endif
     utp_destroy(ctx);
+    ctx=nullptr;
   }
   void updated() const
   {
@@ -402,7 +415,7 @@ struct worker_thread_t
     find_socket(si, id, args);
     if(!si)
     {
-      fprintf(stderr, "WARNING: utp_crust callback handler called when all sockets are destroyed\n");
+      fprintf(stderr, "WARNING: utp_crust callback handler called for unrecognised socket, ignoring\n");
       return 0;
     }
     switch(args->callback_type)
@@ -410,7 +423,7 @@ struct worker_thread_t
       case UTP_ON_FIREWALL:
       {
 #ifdef LOGGING
-        printf("Incoming new connection for socket id %d\n", id);
+        printf("Incoming new connection for socket id %d connected=%d\n", id, si ? (int) si->connected : -1);
 #endif
         if (si)
         {
@@ -419,7 +432,9 @@ struct worker_thread_t
 #ifdef LOGGING
             printf("Listening socket id %d new connection\n", id);
 #endif
+            sockets_lock->unlock();
             si->callback(id, UTP_CRUST_NEW_CONNECTION, args->address, args->address_len, si->data);
+            sockets_lock->lock();
             return 1;  // Reject
           }
           else switch (si->connected)
@@ -441,11 +456,69 @@ struct worker_thread_t
               }
             // Reciprocate connection if I am listening
             case socket_info::connected_t::connecting:
+              if(!(*args->address==si->peer_endpoint))
+              {
+                if (args->address->sa_family != si->peer_endpoint.sa_family)
+                {
+                  fprintf(stderr, "WARNING: Rejecting reciprocating incoming connection as IP type is different\n");
+                  return 1;  // Reject
+                }
+                unsigned short newport=0, oldport=0;
+                switch (args->address->sa_family)
+                {
+                  case AF_INET:
+                  {
+                    struct sockaddr_in *a4 = (struct sockaddr_in *) args->address;
+                    struct sockaddr_in *b4 = (struct sockaddr_in *) &si->peer_endpoint;
+                    // If the address is different, reject
+                    if(a4->sin_addr.s_addr != b4->sin_addr.s_addr)
+                    {
+                      fprintf(stderr, "WARNING: Rejecting reciprocating incoming connection as IP address %x is different to what I connected to %x\n", ntohl(a4->sin_addr.s_addr), ntohl(b4->sin_addr.s_addr));
+                      return 1;  // Reject
+                    }
+                    newport=a4->sin_port;
+                    oldport=b4->sin_port;
+                    break;
+                  }
+                  case AF_INET6:
+                  {
+                    struct sockaddr_in6 *a6 = (struct sockaddr_in6 *) args->address;
+                    struct sockaddr_in6 *b6 = (struct sockaddr_in6 *) &si->peer_endpoint;
+                    // If the address is different, reject
+                    if(memcmp(a6->sin6_addr.s6_addr, b6->sin6_addr.s6_addr, 16))
+                    {
+                      fprintf(stderr, "WARNING: Rejecting reciprocating incoming connection as IP address is different\n");
+                      return 1;  // Reject
+                    }
+                    newport=a6->sin6_port;
+                    oldport=b6->sin6_port;
+                    break;
+                  }
+                }
 #ifdef LOGGING
-              printf("Allowing reciprocated connection from listening socket\n");
+                printf("Allowing rebinding reciprocated connection from new port=%u connection port=%u\n", ntohs(newport), ntohs(oldport));
 #endif
-              si->connected = socket_info::connected_t::connected;
-              return 0;
+                // Close the bootstrap connection
+                utp_close(si->utph);
+                sockets_by_utpsocket.erase(args->socket);
+                sockets_by_peer_endpoint.erase(si->peer_endpoint);
+                // Make a new socket
+                if((si->utph=utp_create_socket(args->context)))
+                {
+                  sockets_by_utpsocket.insert(std::make_pair(si->utph, si));
+                  // Reciprocate connect to the inbound
+                  _do_connect(si, args->address, args->address_len);
+                }
+                return 1;  // Reject
+              }
+              else
+              {
+#ifdef LOGGING
+                printf("Allowing reciprocated connection from socket I connected to\n");
+#endif
+                si->connected = socket_info::connected_t::connected;
+                return 0;
+              }
             default:
               // Is this a reconnect from the current connection? If not, reject
               auto it(sockets_by_peer_endpoint.find(*args->address));
@@ -469,30 +542,37 @@ struct worker_thread_t
         printf("Accepted new connection for socket id %d\n", id);
 #endif
         if (si)
+        {
+          sockets_lock->unlock();
           si->callback(id, UTP_CRUST_NEW_CONNECTION, args->address, args->address_len, si->data);
+          sockets_lock->lock();
+        }
         break;
       }
       case UTP_ON_ERROR:
       {
 #ifdef LOGGING
-        printf("Error on socket id %d\n", id);
+        printf("Error on socket id %d, connected=%d\n", id, si->connected);
 #endif
         if(si)
         {
+          sockets_lock->unlock();
           si->callback(id, UTP_CRUST_LOST_CONNECTION, args->address, args->address_len, si->data);
-          if(si->connected!= socket_info::connected_t::not_connected)
-            si->close();
+          sockets_lock->lock();
+          si->close();
         }
         break;
       }
       case UTP_ON_READ:
       {
 #ifdef LOGGING
-        //printf("New data on socket id %d\n", id);
+        printf("New data on socket id %d\n", id);
 #endif
         if(si)
         {
+          sockets_lock->unlock();
           si->callback(id, UTP_CRUST_NEW_MESSAGE, args->buf, args->len, si->data);
+          sockets_lock->lock();
           if(si->connected!= socket_info::connected_t::not_connected && si->utph)
             utp_read_drained(si->utph);
         }
@@ -511,7 +591,7 @@ struct worker_thread_t
             break;
           case UTP_STATE_WRITABLE:
 #ifdef LOGGING
-            //printf("Now writable on socket id %d\n", id);
+            printf("Now writable on socket id %d\n", id);
 #endif
             if (si)
               si->send_queue_full = false;
@@ -522,7 +602,9 @@ struct worker_thread_t
 #endif
             if(si)
             {
+              sockets_lock->unlock();
               si->callback(id, UTP_CRUST_LOST_CONNECTION, args->address, args->address_len, si->data);
+              sockets_lock->lock();
               //if(si->connected!= socket_info::connected_t::not_connected)
               //  si->close();
             }
@@ -534,7 +616,9 @@ struct worker_thread_t
             assert(si);
             if (si)
             {
+              sockets_lock->unlock();
               si->callback(id, UTP_CRUST_SOCKET_CLEANUP, nullptr, 0, si->data);
+              sockets_lock->lock();
               if(si->connected!= socket_info::connected_t::not_connected)
                 sockets_by_peer_endpoint.erase(si->peer_endpoint);
             }
@@ -551,19 +635,20 @@ struct worker_thread_t
               printf("No more sockets, so closing down UTP worker thread\n");
 #endif
               done=true;
-              std::thread([]{
+              auto hold_self(worker_thread);
+              std::thread([hold_self]{
                 std::unique_lock<std::mutex> h(*sockets_lock);
                 if(sockets_by_id.empty() && worker_thread)
                 {
 #ifdef LOGGING
                   printf("No more sockets, so destroying UTP worker thread\n");
 #endif
-                  if(worker_thread->threadh)
-                  {
-                    worker_thread->threadh->join();
-                    worker_thread->threadh.reset();
-                  }
                   worker_thread.reset();
+                  if(hold_self->threadh)
+                  {
+                    hold_self->threadh->join();
+                    hold_self->threadh.reset();
+                  }
                 }
               }).detach();
             }
@@ -576,6 +661,7 @@ struct worker_thread_t
   }
   void operator()() const
   {
+    auto hold_self(worker_thread);  // Hold shared_ptr to myself while I am running
     unsigned char buffer[65536];
     struct sockaddr_in src_addr;
     socklen_t addrlen = sizeof(src_addr);
@@ -814,6 +900,9 @@ extern "C" int utp_crust_destroy_socket(utp_crust_socket id, int wait)
   if (it != sockets_by_id.end())
   {
     auto si(it->second);
+#ifdef LOGGING
+    printf("UTP destroy socket id %d (addr=%p)\n", id, si.get());
+#endif
     if (!si->send_queue.empty())
       si->send_queue.clear();
     si->close();

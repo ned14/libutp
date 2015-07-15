@@ -2880,6 +2880,7 @@ int utp_process_udp(utp_context *ctx, const byte *buffer, size_t len, const stru
 		ctx->log(UTP_LOG_DEBUG, NULL, "recv send RST to non-SYN (%u stored)", (uint)ctx->rst_info.GetCount());
 		#endif
 
+send_syn:
 		RST_Info &r = ctx->rst_info.Append();
 		r.addr = addr;
 		r.connid = id;
@@ -2914,14 +2915,18 @@ int utp_process_udp(utp_context *ctx, const byte *buffer, size_t len, const stru
 
 			return 1;
 		}
-		// true means yes, block connection.  false means no, don't block.
-		if (utp_call_on_firewall(ctx, to, tolen)) {
-
+		// 1 means yes, block connection.  0 means no, don't block. 2 means send reset.
+		switch (utp_call_on_firewall(ctx, to, tolen)) {
+                  case 0:
+                    break;
+                  case 1:
 			#if UTP_DEBUG_LOGGING
 			ctx->log(UTP_LOG_DEBUG, NULL, "rejected incoming connection, firewall callback returned true");
 			#endif
 
 			return 1;
+                  case 2:
+                    goto send_syn;
 		}
 
 		// Create a new UTP socket to handle this new connection
